@@ -1,0 +1,6 @@
+# Эта папка предназначена для хранения обработанных данных и результатов анализа
+# Файлы, которые будут здесь созданы после запуска Jupyter Notebook:
+# - reviews_2023_cleaned.csv
+# - reviews_2023_preprocessed.csv  
+# - reviews_2023_final.csv
+# - wordcloud_all_reviews.png
