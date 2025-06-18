@@ -20,6 +20,7 @@ from aiohttp import web
 from loguru import logger
 
 from config import get_config, init_directories, validate_config
+from bot.handlers import routers
 
 
 async def on_startup():
@@ -30,11 +31,26 @@ async def on_startup():
     init_directories()
     logger.info("📁 Директории инициализированы")
     
-    # TODO: Инициализация базы данных (будет добавлено позже)
-    logger.info("🗄️ База данных готова")
-    
-    # TODO: Инициализация кэша (будет добавлено позже)
-    logger.info("💾 Кэш готов")
+    # Инициализация сервисов
+    try:
+        from bot.services.sentiment_service import get_sentiment_service
+        from bot.services.visualization_service import get_visualization_service
+        
+        config = get_config()
+        
+        # Инициализация сервиса анализа настроений
+        sentiment_service = get_sentiment_service(config)
+        if sentiment_service.load_existing_data():
+            logger.info("📊 Сервис анализа настроений инициализирован с существующими данными")
+        else:
+            logger.info("📊 Сервис анализа настроений инициализирован (без предзагруженных данных)")
+        
+        # Инициализация сервиса визуализации
+        viz_service = get_visualization_service(config)
+        logger.info("📈 Сервис визуализации инициализирован")
+        
+    except Exception as e:
+        logger.error(f"Ошибка инициализации сервисов: {e}")
     
     logger.info("✅ Бот успешно запущен и готов к работе!")
 
@@ -43,7 +59,16 @@ async def on_shutdown():
     """Очистка ресурсов при остановке бота."""
     logger.info("🔄 Остановка бота...")
     
-    # TODO: Очистка ресурсов
+    # Очистка временных файлов
+    try:
+        config = get_config()
+        temp_dir = config.temp_path
+        if temp_dir.exists():
+            import shutil
+            shutil.rmtree(temp_dir)
+            logger.info("🧹 Временные файлы очищены")
+    except Exception as e:
+        logger.warning(f"Проблема при очистке временных файлов: {e}")
     
     logger.info("✅ Бот корректно остановлен")
 
@@ -106,61 +131,12 @@ async def create_bot_and_dispatcher() -> tuple[Bot, Dispatcher]:
     # Создание диспетчера
     dp = Dispatcher()
     
-    # TODO: Регистрация роутеров (будет добавлено позже)
-    # from bot.handlers import routers
-    # for router in routers:
-    #     dp.include_router(router)
+    # Регистрация всех роутеров
+    for router in routers:
+        dp.include_router(router)
+        logger.info(f"🔗 Зарегистрирован роутер: {router.name if hasattr(router, 'name') else 'unnamed'}")
     
-    # Базовый обработчик для тестирования
-    from aiogram import Router
-    from aiogram.types import Message
-    from aiogram.filters import Command
-    
-    test_router = Router()
-    
-    @test_router.message(Command("start"))
-    async def cmd_start(message: Message):
-        """Команда /start."""
-        await message.answer(
-            "🎬 <b>Добро пожаловать в бот анализа отзывов фильмов!</b>\\n\\n"
-            "Этот бот может анализировать отзывы к фильмам с Кинопоиска.\\n\\n"
-            "🔧 <i>Базовая функциональность подключена</i>\\n"
-            "📊 <i>Полная интеграция в разработке</i>\\n\\n"
-            "Используйте /help для получения справки."
-        )
-    
-    @test_router.message(Command("help"))
-    async def cmd_help(message: Message):
-        """Команда /help."""
-        help_text = (
-            "🤖 <b>Команды бота:</b>\\n\\n"
-            "/start - Приветствие\\n"
-            "/help - Эта справка\\n"
-            "/status - Статус бота\\n\\n"
-            "🚧 <i>Дополнительные команды будут добавлены после полной интеграции:</i>\\n"
-            "• /search - Поиск фильмов\\n"
-            "• /analyze - Анализ отзывов\\n"
-            "• /chart - Создание графиков\\n"
-            "• /wordcloud - Облако слов"
-        )
-        await message.answer(help_text)
-    
-    @test_router.message(Command("status"))
-    async def cmd_status(message: Message):
-        """Команда /status."""
-        config = get_config()
-        status_text = (
-            "📊 <b>Статус бота:</b>\\n\\n"
-            f"✅ Версия: 1.0 (интеграция)\\n"
-            f"✅ Режим: {'Webhook' if config.webhook_mode else 'Long Polling'}\\n"
-            f"✅ Debug: {'Включен' if config.debug else 'Выключен'}\\n"
-            f"✅ Интеграция с данными: {'Да' if config.use_existing_data else 'Нет'}\\n"
-            f"✅ Директория проекта: {config.project_root.name}\\n\\n"
-            "🔧 Интеграция с основным проектом успешна!"
-        )
-        await message.answer(status_text)
-    
-    dp.include_router(test_router)
+    logger.info(f"📋 Всего зарегистрировано роутеров: {len(routers)}")
     
     # Регистрация хуков
     dp.startup.register(on_startup)
@@ -211,6 +187,7 @@ async def run_webhook():
     
     # Добавление дополнительных маршрутов
     app.router.add_get("/health", health_check)
+    app.router.add_get("/status", bot_status)
     
     return app
 
@@ -223,7 +200,49 @@ async def health_check(request):
         "service": "movie-reviews-bot",
         "version": "1.0",
         "integration": "movie-reviews-analysis-2023",
-        "data_integration": config.use_existing_data
+        "data_integration": config.use_existing_data,
+        "timestamp": str(asyncio.get_event_loop().time())
+    })
+
+
+async def bot_status(request):
+    """Подробный статус бота."""
+    config = get_config()
+    
+    # Проверка сервисов
+    services_status = {}
+    try:
+        from bot.services.sentiment_service import get_sentiment_service
+        sentiment_service = get_sentiment_service(config)
+        services_status["sentiment"] = "ok" if sentiment_service else "error"
+    except Exception:
+        services_status["sentiment"] = "error"
+    
+    try:
+        from bot.services.visualization_service import get_visualization_service
+        viz_service = get_visualization_service(config)
+        services_status["visualization"] = "ok" if viz_service else "error"
+    except Exception:
+        services_status["visualization"] = "error"
+    
+    return web.json_response({
+        "bot": {
+            "version": "1.0",
+            "mode": "webhook" if config.webhook_mode else "polling",
+            "debug": config.debug
+        },
+        "integration": {
+            "project_root": str(config.project_root),
+            "use_existing_data": config.use_existing_data,
+            "data_file_exists": config.existing_data_file.exists() if config.use_existing_data else None
+        },
+        "services": services_status,
+        "limits": {
+            "requests_per_hour": config.limits.requests_per_hour,
+            "max_reviews": config.kinopoisk.max_reviews
+        },
+        "handlers": len(routers),
+        "timestamp": str(asyncio.get_event_loop().time())
     })
 
 
@@ -241,10 +260,11 @@ def main():
         config = get_config()
         
         # Вывод информации о запуске
-        logger.info(f"🎬 Запуск бота анализа отзывов фильмов")
+        logger.info("🎬 Запуск Telegram бота анализа отзывов фильмов")
         logger.info(f"📂 Проект: {config.project_root}")
         logger.info(f"🔧 Режим: {'Webhook' if config.webhook_mode else 'Long Polling'}")
         logger.info(f"📊 Интеграция с данными: {'Включена' if config.use_existing_data else 'Отключена'}")
+        logger.info(f"📋 Количество обработчиков: {len(routers)}")
         
         if config.webhook_mode:
             # Режим webhook
